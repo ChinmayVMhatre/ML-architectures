@@ -323,13 +323,13 @@ class MPNN(nn.Module):
 # ══════════════════════════════════════════════════════════════════════════════
 # 5.  TOY GRAPH BUILDER
 # ══════════════════════════════════════════════════════════════════════════════
-
+ 
 def build_toy_graph():
     """
     Builds a small 4-atom graph resembling a fragment of a molecule.
-
+ 
     Graph layout:
-
+ 
             H(1)
             |  0.96 Å
         O(0)
@@ -337,16 +337,16 @@ def build_toy_graph():
             H(2)
             |  1.43 Å
             C(3)
-
+ 
     Node features — one-hot atom type  [O, H, C]:
         Atom 0 (O) → [1, 0, 0]
         Atom 1 (H) → [0, 1, 0]
         Atom 2 (H) → [0, 1, 0]
         Atom 3 (C) → [0, 0, 1]
-
+ 
     Edge features — bond distance in Ångström (scalar).
     Each undirected bond is stored as 2 directed edges.
-
+ 
     Returns:
         node_feat (Tensor): shape (4, 3)
         edge_feat (Tensor): shape (6, 1)   — distances
@@ -360,38 +360,38 @@ def build_toy_graph():
         [0., 1., 0.],   # Atom 2: Hydrogen
         [0., 0., 1.],   # Atom 3: Carbon
     ])
-
+ 
     # (sender, receiver, distance_Angstrom)
     bonds = [(0, 1, 0.96), (0, 2, 0.96), (0, 3, 1.43)]
-
+ 
     src_list, dst_list, dist_list = [], [], []
     for i, j, d in bonds:
         src_list += [i, j]     # both directions
         dst_list += [j, i]
         dist_list += [d, d]
-
+ 
     src       = torch.tensor(src_list)
     dst       = torch.tensor(dst_list)
     edge_feat = torch.tensor(dist_list).unsqueeze(-1).float()  # (6, 1)
-
+ 
     target = torch.tensor([[-5.23]])    # pretend DFT energy
-
+ 
     return node_feat, edge_feat, src, dst, target
-
-
+ 
+ 
 # ══════════════════════════════════════════════════════════════════════════════
 # 6.  TRAINING DEMO
 # ══════════════════════════════════════════════════════════════════════════════
-
+ 
 def run_example():
     """
     Trains the MPNN on the toy graph for 300 steps and prints progress.
-
+ 
     Loss     : Mean Squared Error between predicted and target energy.
     Optimizer: Adam, lr=1e-3.
     Layers   : 3 rounds of message passing
                  → after 3 rounds each atom "knows about" its 3-hop neighbourhood.
-
+ 
     Gradient flow summary:
         Loss
          └─ dL/dPred
@@ -404,9 +404,9 @@ def run_example():
                              └─ dL/d(edge_feat)   [← path to positions/forces]
     """
     torch.manual_seed(42)
-
+ 
     node_feat, edge_feat, src, dst, target = build_toy_graph()
-
+ 
     print("=" * 55)
     print("  Toy Graph")
     print("=" * 55)
@@ -416,7 +416,7 @@ def run_example():
     print(f"  Edge feats : {list(edge_feat.shape)}  (bond distance)")
     print(f"  Target     : {target.item():.3f} eV")
     print()
-
+ 
     model = MPNN(
         node_dim   = 3,
         edge_dim   = 1,
@@ -427,29 +427,42 @@ def run_example():
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Parameters : {n_params}")
     print()
-
+ 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     loss_fn   = nn.MSELoss()
-
+ 
     print("=" * 55)
     print("  Training")
     print("=" * 55)
     print(f"  {'Step':>5}  {'Loss':>12}  {'Prediction':>12}  {'Target':>8}")
     print(f"  {'-'*5}  {'-'*12}  {'-'*12}  {'-'*8}")
-
+ 
     for step in range(300):
         optimizer.zero_grad()
-
+ 
         pred = model(node_feat, edge_feat, src, dst)
         loss = loss_fn(pred, target)
-
+ 
         loss.backward()    # backprop through all message-passing layers
+ 
+        # ── Capture gradients at the very last step ────────────────────
+        # Do this BEFORE optimizer.step() — the raw dL/dW is still in .grad
+        # optimizer.step() updates weights but does NOT clear gradients.
+        # optimizer.zero_grad() clears them — that runs at the TOP of the
+        # next iteration, so step 299 gradients survive here.
+        if step == 299:
+            final_grads = {
+                name: param.grad.detach().clone()
+                for name, param in model.named_parameters()
+                if param.grad is not None
+            }
+ 
         optimizer.step()
-
+ 
         if step % 30 == 0 or step == 299:
             print(f"  {step:>5}  {loss.item():>12.6f}  "
                   f"{pred.item():>12.4f}  {target.item():>8.4f}")
-
+ 
     print()
     print("=" * 55)
     print("  Result")
@@ -459,21 +472,37 @@ def run_example():
     print(f"  Predicted  : {final.item():.4f} eV")
     print(f"  Target     : {target.item():.4f} eV")
     print(f"  Abs Error  : {abs(final.item() - target.item()):.4f} eV")
+ 
+    # ── Final gradients — captured from step 299, before weight update ─
     print()
-
-    # ── Show gradient norms per layer (just for visibility) ───────────
-    print("=" * 55)
-    print("  Gradient norms after final backward()")
-    print("=" * 55)
-    # Run one more backward to populate .grad
-    pred = model(node_feat, edge_feat, src, dst)
-    loss = loss_fn(pred, target)
-    loss.backward()
-
-    for name, param in model.named_parameters():
-        if param.grad is not None:
-            print(f"  {name:<45} {param.grad.norm().item():.6f}")
-
-
+    print("=" * 95)
+    print("  Gradients at end of last epoch  (step 299)  — raw dL/dW before optimizer.step()")
+    print("=" * 95)
+    print(f"  {'Parameter':<50} {'Shape':<18} {'Norm':>10} {'Mean':>10} {'Min':>10} {'Max':>10}")
+    print(f"  {'-'*50} {'-'*18} {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
+ 
+    for name, grad in final_grads.items():
+        shape_str = str(list(grad.shape))
+        print(
+            f"  {name:<50} {shape_str:<18} "
+            f"{grad.norm().item():>10.6f} "
+            f"{grad.mean().item():>10.6f} "
+            f"{grad.min().item():>10.6f} "
+            f"{grad.max().item():>10.6f}"
+        )
+ 
+    # ── Highlight vanishing gradient effect across MP layers ───────────
+    print()
+    print("=" * 95)
+    print("  Gradient norm by MP layer  (should decrease closer to input — vanishing gradient)")
+    print("=" * 95)
+    for layer_idx in range(3):
+        prefix = f"mp_layers.{layer_idx}"
+        layer_grads = {k: v for k, v in final_grads.items() if k.startswith(prefix)}
+        if layer_grads:
+            total_norm = torch.sqrt(sum(g.norm()**2 for g in layer_grads.values()))
+            print(f"  mp_layers.{layer_idx}   total grad norm : {total_norm.item():.6f}")
+ 
+ 
 if __name__ == "__main__":
     run_example()
